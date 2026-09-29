@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow,noarchive">
+<meta name="theme-color" content="#000000">
+<title>ACCESS</title>
+<style>
+  html,body{
+    margin:0;
+    width:100%;
+    height:100%;
+    overflow:hidden;
+    background:#000;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+  }
+  canvas{
+    position:fixed;
+    inset:0;
+    width:100%;
+    height:100%;
+    display:block;
+    background:#000;
+  }
+  #hint{
+    position:fixed;
+    left:50%;
+    bottom:max(5vh,24px);
+    transform:translateX(-50%);
+    color:rgba(255,35,35,.34);
+    font-size:clamp(.70rem,1vw,.92rem);
+    letter-spacing:.08em;
+    white-space:nowrap;
+    opacity:0;
+    transition:opacity 1.1s ease;
+    pointer-events:none;
+  }
+  #hint.show{opacity:1}
+  .cursor{animation:blink 1s steps(1,end) infinite}
+  @keyframes blink{50%{opacity:0}}
+</style>
+</head>
+<body>
+<canvas id="fx"></canvas>
+<div id="hint">// source knows more<span class="cursor">_</span></div>
+
+<script>
+(() => {
+  "use strict";
+
+  const TEXT = "BE A PRO.";
+  const GLYPHS = "01ABCDEF{}[]()<>/\\\\|:;#$_+-=*";
+  const canvas = document.getElementById("fx");
+  const ctx = canvas.getContext("2d");
+  const hint = document.getElementById("hint");
+
+  const off = document.createElement("canvas");
+  const octx = off.getContext("2d", {willReadFrequently:true});
+
+  let W=0,H=0,DPR=1,fontSize=100,centerY=0;
+  let boxes=[], rain=[], locked=[], builders=[];
+  let activeIndex=-1;
+  let state="intro";
+  let stateAt=performance.now();
+  let nextLetterAt=0;
+  let last=performance.now();
+
+  const rnd=(a,b)=>a+Math.random()*(b-a);
+  const pick=s=>s[(Math.random()*s.length)|0];
+
+  function fitFont(){
+    const maxW = W * 0.88;
+    let lo = 40, hi = Math.min(H * 0.42, 360);
+    for(let i=0;i<18;i++){
+      const mid=(lo+hi)/2;
+      octx.font=`900 ${mid}px ui-monospace, monospace`;
+      const w=octx.measureText(TEXT).width;
+      if(w<maxW) lo=mid; else hi=mid;
+    }
+    fontSize=lo;
+  }
+
+  function buildBoxes(){
+    fitFont();
+    octx.font=`900 ${fontSize}px ui-monospace, monospace`;
+    octx.textBaseline="middle";
+    octx.textAlign="left";
+    centerY=H*0.50;
+
+    const widths=[...TEXT].map(ch=>octx.measureText(ch).width);
+    const total=widths.reduce((a,b)=>a+b,0);
+    let x=(W-total)/2;
+    boxes=[];
+    for(let i=0;i<TEXT.length;i++){
+      boxes.push({ch:TEXT[i],x,w:widths[i]});
+      x+=widths[i];
+    }
+  }
+
+  function sampleLetter(i){
+    const b=boxes[i];
+    if(!b || b.ch===" ") return [];
+
+    octx.clearRect(0,0,W,H);
+    octx.font=`900 ${fontSize}px ui-monospace, monospace`;
+    octx.textAlign="left";
+    octx.textBaseline="middle";
+    octx.fillStyle="#fff";
+    octx.fillText(b.ch,b.x,centerY);
+
+    const img=octx.getImageData(0,0,W,H).data;
+    const step=Math.max(6,Math.floor(fontSize/22));
+    const pts=[];
+
+    const x0=Math.max(0,Math.floor(b.x-step));
+    const x1=Math.min(W,Math.ceil(b.x+b.w+step));
+    const y0=Math.max(0,Math.floor(centerY-fontSize*.62));
+    const y1=Math.min(H,Math.ceil(centerY+fontSize*.62));
+
+    for(let y=y0;y<y1;y+=step){
+      for(let x=x0;x<x1;x+=step){
+        const a=img[(y*W+x)*4+3];
+        if(a>150) pts.push({x:x+rnd(-1.1,1.1),y:y+rnd(-1.1,1.1)});
+      }
+    }
+    return pts;
+  }
+
+  function initRain(){
+    const count=Math.max(180,Math.min(340,Math.floor((W*H)/7000)));
+    rain=[];
+    for(let i=0;i<count;i++){
+      rain.push({
+        x:rnd(0,W), y:rnd(-H,H),
+        vy:rnd(55,150),
+        size:rnd(10,16),
+        alpha:rnd(.05,.18),
+        ch:pick(GLYPHS),
+        change:rnd(.06,.18)
+      });
+    }
+  }
+
+  function spawnBuilders(i){
+    const pts=sampleLetter(i);
+    builders=pts.map(t=>({
+      x:t.x+rnd(-fontSize*.08,fontSize*.08),
+      y:rnd(-H*.32,-20),
+      tx:t.x,ty:t.y,
+      vx:rnd(-10,10),
+      vy:rnd(80,180),
+      size:rnd(10,16),
+      alpha:rnd(.72,1),
+      ch:pick(GLYPHS),
+      arrived:false
+    }));
+  }
+
+  function beginLetter(i,now){
+    activeIndex=i;
+    if(i>=TEXT.length){
+      state="hold";
+      stateAt=now;
+      return;
+    }
+    if(TEXT[i]===" "){
+      nextLetterAt=now+180;
+      return;
+    }
+    spawnBuilders(i);
+    state="build";
+    stateAt=now;
+  }
+
+  function commitLetter(now){
+    for(const p of builders){
+      p.x=p.tx; p.y=p.ty; p.arrived=true;
+      locked.push(p);
+    }
+    builders=[];
+    nextLetterAt=now+140;
+    state="gap";
+  }
+
+  function updateRain(dt){
+    const dim = state==="final" ? .45 : 1;
+    for(const p of rain){
+      p.y += p.vy*dt*dim;
+      p.change -= dt;
+      if(p.change<=0){p.ch=pick(GLYPHS);p.change=rnd(.06,.18)}
+      if(p.y>H+20){p.y=rnd(-120,-20);p.x=rnd(0,W)}
+    }
+  }
+
+  function updateBuilders(dt,now){
+    if(state!=="build") return;
+    let arrived=0;
+
+    for(const p of builders){
+      const dx=p.tx-p.x, dy=p.ty-p.y;
+      const dist=Math.hypot(dx,dy);
+
+      p.vx += dx*12*dt;
+      p.vy += dy*12*dt;
+      const drag=Math.pow(.012,dt);
+      p.vx*=drag; p.vy*=drag;
+      p.x+=p.vx*dt; p.y+=p.vy*dt;
+
+      if(Math.random()<.07) p.ch=pick(GLYPHS);
+
+      if(dist<2.5){
+        p.x=p.tx;p.y=p.ty;p.arrived=true;
+      }
+      if(p.arrived) arrived++;
+    }
+
+    if(arrived>=builders.length*.96 || now-stateAt>1200){
+      commitLetter(now);
+    }
+  }
+
+  function drawRain(){
+    ctx.save();
+    ctx.textAlign="center";
+    ctx.textBaseline="middle";
+    for(const p of rain){
+      ctx.font=`${p.size}px ui-monospace, monospace`;
+      ctx.fillStyle=`rgba(180,0,0,${p.alpha})`;
+      ctx.shadowBlur=0;
+      ctx.fillText(p.ch,p.x,p.y);
+    }
+    ctx.restore();
+  }
+
+  function drawParticles(list,bright){
+    ctx.save();
+    ctx.textAlign="center";
+    ctx.textBaseline="middle";
+    for(const p of list){
+      ctx.font=`${p.size}px ui-monospace, monospace`;
+      ctx.fillStyle=bright ? "rgba(255,40,40,.98)" : `rgba(255,38,38,${p.alpha})`;
+      ctx.shadowColor="rgba(255,0,0,.65)";
+      ctx.shadowBlur=bright ? 10 : 7;
+      ctx.fillText(p.ch,p.x,p.y);
+    }
+    ctx.restore();
+  }
+
+  function timeline(now){
+    if(state==="intro" && now-stateAt>1100){
+      beginLetter(0,now);
+    }
+
+    if(state==="gap" && now>=nextLetterAt){
+      beginLetter(activeIndex+1,now);
+    }
+
+    if(state==="build" && TEXT[activeIndex]===" " && now>=nextLetterAt){
+      beginLetter(activeIndex+1,now);
+    }
+
+    if(state==="hold" && now-stateAt>1300){
+      state="final";
+      hint.classList.add("show");
+    }
+  }
+
+  function frame(now){
+    const dt=Math.min(.033,(now-last)/1000||.016);
+    last=now;
+
+    ctx.fillStyle="rgba(0,0,0,.30)";
+    ctx.fillRect(0,0,W,H);
+
+    timeline(now);
+    updateRain(dt);
+    updateBuilders(dt,now);
+
+    drawRain();
+    drawParticles(locked,true);
+    drawParticles(builders,false);
+
+    requestAnimationFrame(frame);
+  }
+
+  function resize(){
+    DPR=Math.max(1,Math.min(devicePixelRatio||1,2));
+    W=innerWidth;H=innerHeight;
+    canvas.width=Math.floor(W*DPR);
+    canvas.height=Math.floor(H*DPR);
+    canvas.style.width=W+"px";
+    canvas.style.height=H+"px";
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+
+    off.width=Math.floor(W*DPR);
+    off.height=Math.floor(H*DPR);
+    octx.setTransform(DPR,0,0,DPR,0,0);
+
+    buildBoxes();
+    initRain();
+
+    // On resize, rebuild already completed letters in the new positions.
+    if(locked.length){
+      const rebuilt=[];
+      const maxIndex=Math.max(0,Math.min(activeIndex,TEXT.length-1));
+      for(let i=0;i<=maxIndex;i++){
+        if(TEXT[i]===" ") continue;
+        for(const t of sampleLetter(i)){
+          rebuilt.push({
+            x:t.x,y:t.y,tx:t.x,ty:t.y,
+            size:rnd(10,16),alpha:1,ch:pick(GLYPHS),arrived:true
+          });
+        }
+      }
+      locked=rebuilt;
+      builders=[];
+    }
+
+    ctx.fillStyle="#000";
+    ctx.fillRect(0,0,W,H);
+  }
+
+  addEventListener("resize",resize,{passive:true});
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+
+<!--
+DON'T FOLLOW THE SYSTEM.
+UNDERSTAND IT.
+
+Discord: @cellroot
+Direct link: https://discord.com/users/CELLROOT_DISCORD_ID
+-->
+</body>
+</html>
